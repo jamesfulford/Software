@@ -199,6 +199,8 @@ class lane_controller(object):
             self.cross_track_integral = 0
             self.k_Id = k_Id
 
+        rospy.loginfo("james.fulford: If you can read this, the code change is deployed!")
+
 
         params_old = (self.v_bar,self.k_d,self.k_theta,self.d_thres,self.theta_thres, self.d_offset, self.k_Id, self.k_Iphi, self.use_feedforward_part, self.use_radius_limit)
         params_new = (v_bar,k_d,k_theta,d_thres,theta_thres, d_offset, k_Id, k_Iphi, use_feedforward_part, use_radius_limit)
