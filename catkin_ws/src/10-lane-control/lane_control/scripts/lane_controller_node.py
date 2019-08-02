@@ -7,6 +7,11 @@ from duckietown_msgs.msg import Twist2DStamped, LanePose, WheelsCmdStamped, Bool
 import time
 import numpy as np
 
+
+INCREMENT_WRAP_AROUND = 100
+LEARNING_RATE = 0.01
+
+
 class lane_controller(object):
 
     def __init__(self):
@@ -164,6 +169,16 @@ class lane_controller(object):
         self.object_detected = self.setupParameter("~object_detected", 0)
         self.v_ref_possible["default"] = self.v_max
 
+        self.reset_backprop()
+
+    def reset_backprop(self):
+        # Used for backprop
+        self.incrementor_int = 0
+        self.epoch_absolute_error_d = 0.0
+        self.epoch_squared_error_d = 0.0
+        self.incrementor_int = 0
+        self.prev_rmse = 0.0
+
 
     def getGains_event(self, event):
         v_bar = rospy.get_param("~v_bar")
@@ -202,8 +217,30 @@ class lane_controller(object):
         rospy.loginfo("james.fulford: If you can read this, the code change is deployed!")
 
 
-        params_old = (self.v_bar,self.k_d,self.k_theta,self.d_thres,self.theta_thres, self.d_offset, self.k_Id, self.k_Iphi, self.use_feedforward_part, self.use_radius_limit)
-        params_new = (v_bar,k_d,k_theta,d_thres,theta_thres, d_offset, k_Id, k_Iphi, use_feedforward_part, use_radius_limit)
+        params_old = (
+            self.v_bar,
+            # self.k_d,
+            # self.k_theta,
+            self.d_thres,
+            self.theta_thres,
+            self.d_offset,
+            # self.k_Id,
+            # self.k_Iphi,
+            self.use_feedforward_part,
+            self.use_radius_limit
+        )
+        params_new = (
+            v_bar,
+            # k_d,
+            # k_theta,
+            d_thres,
+            theta_thres,
+            d_offset,
+            # k_Id,
+            # k_Iphi,
+            use_feedforward_part,
+            use_radius_limit
+        )
 
         if params_old != params_new:
             rospy.loginfo("[%s] Gains changed." %(self.node_name))
@@ -221,6 +258,8 @@ class lane_controller(object):
 
             self.use_feedforward_part = use_feedforward_part
 
+            # gains changed, resetting backprop
+            self.reset_backprop()
 
             if use_radius_limit != self.use_radius_limit:
                 self.use_radius_limit = use_radius_limit
@@ -380,6 +419,34 @@ class lane_controller(object):
     def publishCmd(self, car_cmd_msg):
         self.pub_car_cmd.publish(car_cmd_msg)
 
+    def backprop(self):
+        rospy.loginfo("dgmd-s17/ running backprop")
+
+        rmse_d = (self.epoch_squared_error_d / self.incrementor_int) ** 0.5
+        delta_error_d = self.prev_rmse_d - rmse_d
+        rospy.loginfo("dgmd-s17/ distance: {} rmse_d, {} delta over last epoch".format(rmse_d, delta_error_d))
+
+        rmse_phi = (self.epoch_absolute_error_phi / self.incrementor_int) ** 0.5
+        delta_error_phi = self.prev_rmse_phi - rmse_phi
+        rospy.loginfo("dgmd-s17/ distance: {} rmse_phi, {} delta over last epoch".format(rmse_phi, delta_error_phi))
+
+        rospy.loginfo("dgmd-s17/ gains_d before: {}, {} integral".format(self.k_d, self.k_Id))
+        self.k_d -= self.k_d * (-self.cross_track_err) * delta_error_d * LEARNING_RATE
+        self.k_Id -= self.k_Id * (-self.epoch_absolute_error_d) * delta_error_d * LEARNING_RATE
+        rospy.loginfo("dgmd-s17/ gains_d after: {}, {} integral".format(self.k_d, self.k_Id))
+
+        rospy.loginfo("dgmd-s17/ gains_phi before: {}, {} integral".format(self.k_theta, self.k_Iphi))
+        self.k_theta -= self.k_theta * (-self.heading_err) * delta_error_phi * LEARNING_RATE
+        self.k_Iphi -= self.k_Iphi * (-self.epoch_absolute_error_phi) * delta_error_phi * LEARNING_RATE
+        rospy.loginfo("dgmd-s17/ gains_phi after: {}, {} integral".format(self.k_theta, self.k_Iphi))
+
+        # Store rmse for next backprop
+        self.prev_rmse_d = rmse_d
+
+        # Reset backprop accumulators
+        self.epoch_squared_error_d = 0.0
+        self.epoch_absolute_error_d = 0.0
+
     def updatePose(self, pose_msg):
         self.lane_reading = pose_msg
 
@@ -446,8 +513,6 @@ class lane_controller(object):
         omega += (omega_feedforward)
 
 
-
-
         # check if nominal omega satisfies min radius, otherwise constrain it to minimal radius
         if math.fabs(omega) > car_control_msg.v / self.min_radius:
             if self.last_ms is not None:
@@ -481,6 +546,22 @@ class lane_controller(object):
         car_control_msg.omega = omega
         self.publishCmd(car_control_msg)
         self.last_ms = currentMillis
+
+        #
+        # Backpropagation
+        #
+        self.incrementor_int = (
+            self.incrementor_int + 1
+        ) % INCREMENT_WRAP_AROUND
+
+        self.epoch_absolute_error_d += abs(self.cross_track_err)
+        self.epoch_squared_error_d += self.cross_track_err ** 2
+
+        self.epoch_absolute_error_phi += abs(self.heading_err)
+        self.epoch_squared_error_phi += self.heading_err ** 2
+
+        if self.incrementor_int == 0:
+            self.backprop()
 
 
 
